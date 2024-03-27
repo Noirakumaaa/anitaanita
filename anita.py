@@ -2,7 +2,6 @@ import tkinter as tk
 from datetime import datetime
 import openai
 import sqlite3
-from dotenv import load_dotenv
 import speech_recognition as sr
 from gtts import gTTS
 import threading
@@ -19,9 +18,7 @@ class AnitaSystem:
         self.chat_history_file = "chathistory.txt"
         self.orf_file = "orf.txt"
         self.bg_image = "Miku.png"
-
-        # Load OpenAI API key
-        load_dotenv()
+        #api
         openai.api_key = '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'
 
         # Initialize speech recognizer and pygame mixer
@@ -37,9 +34,9 @@ class AnitaSystem:
         self.anita_orfConvertion = None
 
         # Get current time and date
-        current_time = datetime.now().strftime("%I:%M:%S %p")
-        current_date = datetime.now().strftime("%A, %B %d, %Y")
-        self.timeDate = f'The current time is {current_time} and the date is {current_date}'
+        self.current_time = datetime.now().strftime("%I:%M:%S %p")
+        self.current_date = datetime.now().strftime("%A, %B %d, %Y")
+        self.timeDate = f'The current time is {self.current_time} and the date is {self.current_date}'
 
         # Initialize GUI components
         self.root = tk.Tk()
@@ -54,9 +51,50 @@ class AnitaSystem:
         self.output_textbox.pack(side="bottom")
         self.speak_button = tk.Button(self.root, text="Start Listening", command=self.start_listening)
         self.speak_button.pack(side="bottom")
+        
+        # Create database connection and cursor
+        self.conn = sqlite3.connect('Conversations.db', check_same_thread=False)
+        self.cursor = self.conn.cursor()
+        self.create_table()  # Create table if not exists
 
         # Start GUI main loop
         self.root.mainloop()
+
+    def create_table(self):
+        # Create users table if not exists
+        self.cursor.execute('''CREATE TABLE IF NOT EXISTS users 
+                    (id INTEGER PRIMARY KEY, name TEXT, chat TEXT, time TEXT, date TEXT)''')
+        self.conn.commit()
+
+    def save_to_database(self, user, anita, time, date):
+        try:
+            # Insert user and Anita chats
+            self.cursor.execute("INSERT INTO users (name, chat, time, date) VALUES (?, ?, ?, ?), (?, ?, ?, ?)",
+                                ('User', user, time, date, 'Anita', anita, time, date))
+            # Commit changes to database
+            self.conn.commit()
+            # Update chat history
+            self.memoryHandler(self.cursor)
+            self.get_chathistory(self.cursor)
+        except sqlite3.Error as e:
+            print("Error saving to database:", e)
+
+    def memoryHandler(self, cursor):
+        try:
+            # Execute the SQL query to get the maximum ID
+            cursor.execute("SELECT MAX(id) FROM users")
+            max_id = cursor.fetchone()[0]
+
+            # Execute the SQL query to get the count of IDs
+            cursor.execute("SELECT COUNT(id) FROM users")
+            count = cursor.fetchone()[0]
+
+            if max_id is not None and count is not None and count >= 80:
+                cursor.execute("DELETE FROM users WHERE id <= ?", (max_id - 80,))
+                self.conn.commit()
+
+        except sqlite3.Error as e:
+            print("Error in memoryHandler:", e)
 
 
     def changeMic(self):
@@ -91,20 +129,7 @@ class AnitaSystem:
         return text
 
     # Function to save conversation to the database
-    def save_to_database(self, user, anita, time, date):
-        conn = sqlite3.connect('Conversations.db')
-        cursor = conn.cursor()
-        # Create database table if not exists
-        cursor.execute('''CREATE TABLE IF NOT EXISTS users 
-                    (id INTEGER PRIMARY KEY, name TEXT, chat TEXT, time TEXT, date TEXT)''')
-        # Insert user's chat
-        cursor.execute("INSERT INTO users (name, chat, time, date) VALUES (?, ?, ?, ?)", ('User', user, time, date))
-        # Insert anita's chat
-        cursor.execute("INSERT INTO users (name, chat, time, date) VALUES (?, ?, ?, ?)", ('Anita', anita, time, date))
-        # Commit changes to database
-        conn.commit()
-        # Update chat history
-        self.get_chathistory(cursor)
+
 
     # Function to retrieve chat history from the database and write it to a file
     def get_chathistory(self, cursor):
@@ -117,7 +142,7 @@ class AnitaSystem:
                 Wfile.write(str(row) + '\n')  # Write each row to the file
 
     # Function to recognize speech
-    def recognize_speech(self, recognizer, audio):
+    def recognize_speech(self, recognizer, audio, conn, cursor):
         try:
             # Extract text from ORF PDF
             orf = self.extract_text_pdf("ORF.pdf")
@@ -137,13 +162,11 @@ class AnitaSystem:
                     {"role": "user", "content": user_speech_input},  # User input
                 ],
             )
-            current_time = datetime.now().strftime("%I:%M:%S %p")  # Current time
-            current_date = datetime.now().strftime("%A, %B %d, %Y")  # Current date
 
             response_text = response.choices[0].message["content"]
             self.write_to_textbox(response_text + "\n")
             self.speak_response(response_text)
-            self.save_to_database(self.live_transcription, response_text, current_time, current_date)
+            self.save_to_database(self.live_transcription, response_text, self.current_time, self.current_date)
 
         except sr.UnknownValueError:
             print("Could not understand audio")
@@ -189,7 +212,7 @@ class AnitaSystem:
                 self.r.adjust_for_ambient_noise(source)
                 try:
                     audio = self.r.listen(source, timeout=4)
-                    threading.Thread(target=self.recognize_speech, args=(self.r, audio)).start()
+                    threading.Thread(target=self.recognize_speech, args=(self.r, audio, self.conn, self.cursor)).start()
                 except sr.WaitTimeoutError:
                     print("Timeout. No speech detected.")
         finally:
